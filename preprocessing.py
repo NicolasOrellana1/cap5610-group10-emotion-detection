@@ -2,6 +2,8 @@
 # preprocessing.py
 #
 # HOW TO USE
+# 0. Set up environment so we can all work with consistent dependencies 
+    # python setup.py // python3 setup.py
 # 1. pip install datasets pandas scikit-learn
 # 2. python preprocessing.py
 #
