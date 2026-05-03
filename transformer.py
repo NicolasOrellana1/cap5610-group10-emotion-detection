@@ -2,7 +2,7 @@
 
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix, classification_report, ConfusionMatrixDisplay
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from transformers import Trainer, TrainingArguments
+from transformers import Trainer, TrainingArguments, TrainerCallback
 import matplotlib.pyplot as plt
 import pandas as pd
 import scipy.sparse as sparse
@@ -79,6 +79,39 @@ def compute_metrics(eval_pred):
     }
 
 
+class PerEpochTestEvalCallback(TrainerCallback):
+    """Runs test-set evaluation after each epoch (metrics prefixed with ``test_``)."""
+
+    def __init__(self, test_dataset, trainer_holder):
+        self.test_dataset = test_dataset
+        self.trainer_holder = trainer_holder
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        trainer = self.trainer_holder[0]
+        if trainer is None:
+            return control
+        trainer.evaluate(eval_dataset=self.test_dataset, metric_key_prefix="test")
+        return control
+
+
+def accuracies_by_epoch_from_log_history(history):
+    """Pull validation (eval_*) and per-epoch test (test_*) accuracies keyed by epoch."""
+    val_epoch_to_acc = {}
+    test_epoch_to_acc = {}
+    for log_item in history:
+        if "epoch" not in log_item:
+            continue
+        epoch = float(log_item["epoch"])
+        if "eval_accuracy" in log_item:
+            val_epoch_to_acc[epoch] = log_item["eval_accuracy"]
+        if "test_accuracy" in log_item:
+            test_epoch_to_acc[epoch] = log_item["test_accuracy"]
+    epochs = sorted(set(val_epoch_to_acc.keys()) | set(test_epoch_to_acc.keys()))
+    val_accs = [val_epoch_to_acc.get(ep, np.nan) for ep in epochs]
+    test_accs = [test_epoch_to_acc.get(ep, np.nan) for ep in epochs]
+    return epochs, val_accs, test_accs
+
+
 # Manual hyperparameter grid
 learning_rates = [2e-5, 3e-5, 5e-5]
 batch_sizes = [8, 16]
@@ -111,13 +144,18 @@ for lr in learning_rates:
                 report_to="none",
             )
 
+            trainer_holder = [None]
+            callbacks = [PerEpochTestEvalCallback(tokenized_test, trainer_holder)]
+
             trainer = Trainer(
                 model=build_model(),
                 args=training_args,
                 train_dataset=tokenized_train,
                 eval_dataset=tokenized_val,
                 compute_metrics=compute_metrics,
+                callbacks=callbacks,
             )
+            trainer_holder[0] = trainer
 
             trainer.train()
             val_metrics = trainer.evaluate(eval_dataset=tokenized_val)
@@ -185,29 +223,21 @@ plt.tight_layout()
 plt.savefig("results/confusion_matrix_test.png", dpi=300, bbox_inches="tight")
 plt.show()
 
-# Build validation/test accuracy vs epoch from trainer log history.
+# Build validation/test accuracy vs epoch from best run's log history
+# (per-epoch test metrics come from PerEpochTestEvalCallback during that run).
 history = best_trainer.state.log_history
-val_epoch_to_acc = {}
-for log_item in history:
-    if "epoch" not in log_item:
-        continue
-    epoch = float(log_item["epoch"])
-    if "eval_accuracy" in log_item:
-        val_epoch_to_acc[epoch] = log_item["eval_accuracy"]
-
-epochs = sorted(val_epoch_to_acc.keys())
-val_accs = [val_epoch_to_acc.get(ep, np.nan) for ep in epochs]
-
-# Bare minimum: plot final test accuracy as a flat reference line.
+epochs, val_accs, test_accs = accuracies_by_epoch_from_log_history(history)
 test_acc_final = test_metrics.get("test_accuracy", np.nan)
-test_accs = [test_acc_final for _ in epochs]
+for i in range(len(test_accs)):
+    if np.isnan(test_accs[i]):
+        test_accs[i] = test_acc_final
 
 plt.figure(figsize=(8, 5))
 plt.plot(epochs, val_accs, marker="o", label="Validation Accuracy")
 plt.plot(epochs, test_accs, marker="s", label="Test Accuracy")
 plt.xlabel("Epoch")
 plt.ylabel("Accuracy")
-plt.title("Validation and Test Accuracy vs Epoch")
+plt.title("Transformer - Learning Curve")
 plt.xticks(epochs)
 plt.grid(True, linestyle="--", alpha=0.4)
 plt.legend()
