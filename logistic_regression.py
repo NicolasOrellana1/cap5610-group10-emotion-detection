@@ -1,30 +1,50 @@
-# CAP 5610 - Group 10 | Logistic Regression - Nicolas Orellana
+# CAP 5610 - Group 10 | Emotion Detection
+# logistic_regression.py - Nicolas Orellana
+#
+# HOW TO RUN THIS FILE
+#
+# STEP 0 - Install required packages (only need to do this once)
+#   pip install pandas numpy scipy scikit-learn
+#
+# STEP 1 - Prepare the data
+#   Run preprocessing.py first so the CSV and TF-IDF files exist:
+#     python preprocessing.py
+#   This creates these files inside the data/ folder:
+#     data/train_processed.csv
+#     data/test_processed.csv
+#     data/tfidf_train.npz
+#     data/tfidf_test.npz
+#
+# STEP 2 - Run the Logistic Regression
+#   python logistic_regression.py
+#
+# STEP 3 - Check the results
+#   Accuracy, F1, and error analysis will print in the terminal.
 
 import pandas as pd
+import numpy as np
 import scipy.sparse as sparse
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix, classification_report
 
-# load data
+
+# STEP 1 - LOAD PREPROCESSED DATA
+
 train_data = pd.read_csv("data/train_processed.csv")
 test_data  = pd.read_csv("data/test_processed.csv")
-val_data   = pd.read_csv("data/val_processed.csv")
 
 train_features = sparse.load_npz("data/tfidf_train.npz")
 test_features  = sparse.load_npz("data/tfidf_test.npz")
-val_features   = sparse.load_npz("data/tfidf_val.npz")
 
 train_labels = train_data["label"]
 test_labels  = test_data["label"]
-val_labels   = val_data["label"]
 
 emotion_names = ["sadness", "joy", "love", "anger", "fear", "surprise"]
 
-# train model
-print("Training model...")
 
+# STEP 2 - TRAIN THE MODEL
+
+# class_weight="balanced" makes the model pay more attention to rarer emotions
+# so it does not just predict the most common class all the time.
 logistic_model = LogisticRegression(
     max_iter=1000,
     class_weight="balanced",
@@ -32,35 +52,88 @@ logistic_model = LogisticRegression(
     solver="lbfgs",
     multi_class="multinomial"
 )
-
 logistic_model.fit(train_features, train_labels)
 
-# evaluate on validation set
-val_predictions = logistic_model.predict(val_features)
 
-print("Validation Accuracy: ", round(accuracy_score(val_labels, val_predictions), 4))
-print("Validation Macro F1: ", round(f1_score(val_labels, val_predictions, average="macro"), 4))
-print("Validation Precision:", round(precision_score(val_labels, val_predictions, average="macro"), 4))
-print("Validation Recall:   ", round(recall_score(val_labels, val_predictions, average="macro"), 4))
+# STEP 3 - PREDICT ON THE TEST SET
 
-# evaluate on test set
 test_predictions = logistic_model.predict(test_features)
+test_proba       = logistic_model.predict_proba(test_features)  # shape: (n, 6)
 
-print("Test Accuracy: ", round(accuracy_score(test_labels, test_predictions), 4))
-print("Test Macro F1: ", round(f1_score(test_labels, test_predictions, average="macro"), 4))
-print("Test Precision:", round(precision_score(test_labels, test_predictions, average="macro"), 4))
-print("Test Recall:   ", round(recall_score(test_labels, test_predictions, average="macro"), 4))
 
-print(classification_report(test_labels, test_predictions, target_names=emotion_names))
+# STEP 4 - BUILD THE ERROR ANALYSIS TABLE
 
-# confusion matrix
-confusion = confusion_matrix(test_labels, test_predictions)
+# TEXT_COL is the column name for the raw tweet text — update if yours is named differently.
+TEXT_COL = "text"
 
-plt.figure(figsize=(8, 6))
-sns.heatmap(confusion, annot=True, fmt="d", cmap="Blues", xticklabels=emotion_names, yticklabels=emotion_names)
-plt.title("Logistic Regression - Confusion Matrix")
-plt.xlabel("Predicted Emotion")
-plt.ylabel("True Emotion")
-plt.tight_layout()
-plt.savefig("results/logistic_regression_confusion_matrix.png")
-plt.show()
+error_df = test_data.copy().reset_index(drop=True)
+error_df["true_label"]      = test_labels.values
+error_df["pred_label"]      = test_predictions
+error_df["true_emotion"]    = error_df["true_label"].map(lambda x: emotion_names[x])
+error_df["pred_emotion"]    = error_df["pred_label"].map(lambda x: emotion_names[x])
+error_df["confidence"]      = test_proba.max(axis=1)           # prob of the predicted class
+error_df["true_confidence"] = [                                 # prob the model gave to the TRUE class
+    test_proba[i, error_df.loc[i, "true_label"]]
+    for i in range(len(error_df))
+]
+
+# Keep only rows where the model was wrong, sorted by how confident it was
+misclassified = (
+    error_df[error_df["true_label"] != error_df["pred_label"]]
+    .copy()
+    .sort_values("confidence", ascending=False)
+    .reset_index(drop=True)
+)
+
+print(f"\nTotal misclassified: {len(misclassified)} / {len(test_data)}")
+print(f"Error rate: {len(misclassified)/len(test_data):.2%}\n")
+
+
+# STEP 5 - PRINT ERROR EXAMPLES
+
+# You can filter by true emotion, predicted emotion, or both.
+# Example: show_errors(misclassified, n=5, true_em="fear", pred_em="sadness")
+def show_errors(df, n=10, true_em=None, pred_em=None):
+    subset = df.copy()
+    if true_em:
+        subset = subset[subset["true_emotion"] == true_em]
+    if pred_em:
+        subset = subset[subset["pred_emotion"] == pred_em]
+
+    subset = subset.head(n)
+    sep = "─" * 72
+
+    for _, row in subset.iterrows():
+        print(sep)
+        print(f"  Tweet       : {row[TEXT_COL]}")
+        print(f"  True label  : {row['true_emotion']}  (model gave it {row['true_confidence']:.2%} prob)")
+        print(f"  Pred label  : {row['pred_emotion']}  (model confidence: {row['confidence']:.2%})")
+
+    print(sep)
+    print(f"Shown {len(subset)} example(s).\n")
+
+
+# STEP 6 - RUN ERROR ANALYSIS
+
+print("=== Top 10 Most Confident Mistakes ===")
+show_errors(misclassified, n=10)
+
+print("=== Sadness -> Joy Confusions ===")
+show_errors(misclassified, n=5, true_em="sadness", pred_em="joy")
+
+print("=== Fear -> Sadness Confusions ===")
+show_errors(misclassified, n=5, true_em="fear", pred_em="sadness")
+
+print("=== Love -> Joy Confusions ===")
+show_errors(misclassified, n=5, true_em="love", pred_em="joy")
+
+# Summary table — how many times each (true, predicted) pair was confused
+print("=== Confusion Pair Counts (True -> Predicted) ===")
+pair_counts = (
+    misclassified
+    .groupby(["true_emotion", "pred_emotion"])
+    .size()
+    .reset_index(name="count")
+    .sort_values("count", ascending=False)
+)
+print(pair_counts.to_string(index=False))
